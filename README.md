@@ -1,2 +1,8 @@
-# jooan-ipcamera-scripts
-乔安摄像头 脚本分享
+# 乔安摄像头脚本分享
+
+## onvif_proxy.py - Frigate ONVIF代理
+__此脚本由AI生成！__  
+本脚本可以解决乔安部分摄像头因采用**非标准 ONVIF 协议**而无法直接接入 Frigate NVR 的问题。通过本脚本的转发或转换，可以实现与 Frigate 的顺利对接。
+
+在使用脚本之前，你需要编辑脚本文件并修改 `TARGET_PTZ_URL` 变量。  
+通常情况下，你只需要将变量中的 **IP 地址** 部分替换为你摄像机的实际 IP。
