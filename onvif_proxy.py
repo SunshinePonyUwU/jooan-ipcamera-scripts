@@ -1,13 +1,11 @@
 import http.server
 import urllib.request
 import socket
+import argparse
 import sys
 import re
 
 print = lambda *args, **kwargs: None
-
-LISTEN_PORT = 8999
-TARGET_PTZ_URL = "http://172.18.0.154:8899/onvif/Ptz"
 
 CAPABILITIES_XML = """<?xml version="1.0" encoding="UTF-8"?>
 <SOAP-ENV:Envelope xmlns:SOAP-ENV="http://www.w3.org/2003/05/soap-envelope" xmlns:tds="http://www.onvif.org/ver10/device/wsdl" xmlns:tt="http://www.onvif.org/ver10/schema">
@@ -50,6 +48,9 @@ MOCK_RESPONSES = {
 }
 
 class FrigateOnvifProxy(http.server.BaseHTTPRequestHandler):
+    listen_port = 8891
+    target_ptz_url = "http://172.18.0.154:8899/onvif/Ptz"
+
     def do_POST(self):
         content_length = int(self.headers.get('Content-Length', 0))
         body = self.rfile.read(content_length).decode('utf-8')
@@ -57,7 +58,7 @@ class FrigateOnvifProxy(http.server.BaseHTTPRequestHandler):
         if any(cmd in body for cmd in ["ContinuousMove", "Stop", "AbsoluteMove", "RelativeMove"]):
             self.forward_to_real_camera(body)
         elif "GetCapabilities" in body:
-            self.send_xml(CAPABILITIES_XML.format(host=self.headers.get('Host'), port=LISTEN_PORT))
+            self.send_xml(CAPABILITIES_XML.format(host=self.headers.get('Host'), port=self.listen_port))
         elif "GetProfiles" in body:
             self.send_xml(GET_PROFILES_XML)
         else:
@@ -66,7 +67,6 @@ class FrigateOnvifProxy(http.server.BaseHTTPRequestHandler):
     def forward_to_real_camera(self, body):
         print(f"[FORWARD] 正在提取速度并重组报文...")
         try:
-            # 1. 提取速度值
             pan_match = re.search(r'x="([-+]?\d*\.?\d+)"', body)
             tilt_match = re.search(r'y="([-+]?\d*\.?\d+)"', body)
 
@@ -109,7 +109,7 @@ class FrigateOnvifProxy(http.server.BaseHTTPRequestHandler):
             }
 
             req = urllib.request.Request(
-                TARGET_PTZ_URL,
+                self.target_ptz_url,
                 data=payload.encode('utf-8'),
                 headers=headers,
                 method='POST'
@@ -155,6 +155,28 @@ class HTTPServer(http.server.HTTPServer):
         super().server_bind()
 
 if __name__ == "__main__":
-    httpd = HTTPServer(('', LISTEN_PORT), FrigateOnvifProxy)
-    print(f"ONVIF 代理服务器已启动: {LISTEN_PORT}")
-    httpd.serve_forever()
+    parser = argparse.ArgumentParser(description="Frigate ONVIF PTZ PROXY")
+    parser.add_argument(
+        "-p", "--port",
+        type=int,
+        default=8891
+    )
+    parser.add_argument(
+        "-t", "--target",
+        type=str,
+        default="http://172.18.0.154:8899/onvif/Ptz"
+    )
+
+    args = parser.parse_args()
+
+    FrigateOnvifProxy.listen_port = args.port
+    FrigateOnvifProxy.target_ptz_url = args.target
+
+    httpd = HTTPServer(('', args.port), FrigateOnvifProxy)
+    print(f"ONVIF PROXY LISTENING: {args.port}")
+    print(f"PTZ URL: {args.target}")
+
+    try:
+        httpd.serve_forever()
+    except KeyboardInterrupt:
+        sys.exit(0)
