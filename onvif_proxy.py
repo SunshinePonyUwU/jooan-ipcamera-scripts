@@ -30,18 +30,15 @@ GET_PROFILES_XML = """<?xml version="1.0" encoding="UTF-8"?>
         <tt:VideoEncoderConfiguration token="VEC_01"><tt:Encoding>H264</tt:Encoding><tt:Resolution><tt:Width>1920</tt:Width><tt:Height>1080</tt:Height></tt:Resolution></tt:VideoEncoderConfiguration>
         <tt:PTZConfiguration token="PTZ_CONF_01">
           <tt:NodeToken>Node_01</tt:NodeToken>
-          <tt:DefaultContinuousPanTiltVelocitySpace>http://www.onvif.org/ver10/tptz/PanTiltSpaces/VelocityGenericSpace</tt:DefaultContinuousPanTiltVelocitySpace>
+          <tt:DefaultContinuousPanTiltVelocitySpace>http://www.onvif.org/ver10/tptz/PanTiltSpaces/VelocityGenericSpace</tt:DefaultContinuousPanTiltVelocitySpace>{zoom_space}
         </tt:PTZConfiguration>
       </trt:Profiles>
     </trt:GetProfilesResponse>
   </SOAP-ENV:Body>
 </SOAP-ENV:Envelope>"""
 
-# 如果支持缩放加上
-# <tt:DefaultContinuousZoomVelocitySpace>http://www.onvif.org/ver10/tptz/ZoomSpaces/VelocityGenericSpace</tt:DefaultContinuousZoomVelocitySpace>
-
 MOCK_RESPONSES = {
-    "GetDeviceInformation": """<?xml version="1.0" encoding="UTF-8"?><SOAP-ENV:Envelope xmlns:SOAP-ENV="http://www.w3.org/2003/05/soap-envelope" xmlns:tds="http://www.onvif.org/ver10/device/wsdl"><SOAP-ENV:Body><tds:GetDeviceInformationResponse><tds:Manufacturer>Fake-Camera</tds:Manufacturer><tds:Model>Proxy-01</tds:Model><tds:FirmwareVersion>1.0</tds:FirmwareVersion><tds:SerialNumber>12345</tds:SerialNumber><tds:HardwareId>1.0</tds:HardwareId></tds:GetDeviceInformationResponse></SOAP-ENV:Body></SOAP-ENV:Envelope>""",
+    "GetDeviceInformation": """<?xml version="1.0" encoding="UTF-8"?><SOAP-ENV:Envelope xmlns:SOAP-ENV="http://www.w3.org/2003/05/soap-envelope" xmlns:tds="http://www.onvif.org/ver10/device/wsdl"><SOAP-ENV:Body><tds:GetDeviceInformationResponse><tds:Manufacturer>Fake-Camera</tds:Manufacturer><tds:Model>Proxy-01</tds:Model><tds:FirmwareVersion>1.0</tt:FirmwareVersion><tds:SerialNumber>12345</tds:SerialNumber><tds:HardwareId>1.0</tds:HardwareId></tds:GetDeviceInformationResponse></SOAP-ENV:Body></SOAP-ENV:Envelope>""",
     "GetNodes": """<?xml version="1.0" encoding="UTF-8"?><SOAP-ENV:Envelope xmlns:SOAP-ENV="http://www.w3.org/2003/05/soap-envelope" xmlns:tptz="http://www.onvif.org/ver10/ptz/wsdl" xmlns:tt="http://www.onvif.org/ver10/schema"><SOAP-ENV:Body><tptz:GetNodesResponse><tptz:PTZNode token="Node_01"><tt:Name>Node1</tt:Name><tt:SupportedPTZSpaces/></tptz:PTZNode></tptz:GetNodesResponse></SOAP-ENV:Body></SOAP-ENV:Envelope>""",
     "GetConfigurations": """<?xml version="1.0" encoding="UTF-8"?><SOAP-ENV:Envelope xmlns:SOAP-ENV="http://www.w3.org/2003/05/soap-envelope" xmlns:tptz="http://www.onvif.org/ver10/ptz/wsdl" xmlns:tt="http://www.onvif.org/ver10/schema"><SOAP-ENV:Body><tptz:GetConfigurationsResponse><tptz:PTZConfiguration token="PTZ_CONF_01"><tt:Name>Config1</tt:Name><tt:NodeToken>Node_01</tt:NodeToken></tptz:PTZConfiguration></tptz:GetConfigurationsResponse></SOAP-ENV:Body></SOAP-ENV:Envelope>""",
     "GetPresets": """<?xml version="1.0" encoding="UTF-8"?><SOAP-ENV:Envelope xmlns:SOAP-ENV="http://www.w3.org/2003/05/soap-envelope" xmlns:tptz="http://www.onvif.org/ver10/ptz/wsdl"><SOAP-ENV:Body><tptz:GetPresetsResponse></tptz:GetPresetsResponse></s:Body></s:Envelope>"""
@@ -50,6 +47,7 @@ MOCK_RESPONSES = {
 class FrigateOnvifProxy(http.server.BaseHTTPRequestHandler):
     listen_port = 8891
     target_ptz_url = "http://172.18.0.154:8899/onvif/Ptz"
+    enable_zoom = False
 
     def do_POST(self):
         content_length = int(self.headers.get('Content-Length', 0))
@@ -60,7 +58,8 @@ class FrigateOnvifProxy(http.server.BaseHTTPRequestHandler):
         elif "GetCapabilities" in body:
             self.send_xml(CAPABILITIES_XML.format(host=self.headers.get('Host'), port=self.listen_port))
         elif "GetProfiles" in body:
-            self.send_xml(GET_PROFILES_XML)
+            zoom_str = "\n          <tt:DefaultContinuousZoomVelocitySpace>http://www.onvif.org/ver10/tptz/ZoomSpaces/VelocityGenericSpace</tt:DefaultContinuousZoomVelocitySpace>" if self.enable_zoom else ""
+            self.send_xml(GET_PROFILES_XML.format(zoom_space=zoom_str))
         else:
             self.match_and_mock(body)
 
@@ -166,11 +165,16 @@ if __name__ == "__main__":
         type=str,
         default="http://172.18.0.154:8899/onvif/Ptz"
     )
+    parser.add_argument(
+        "-z", "--zoom",
+        action="store_true"
+    )
 
     args = parser.parse_args()
 
     FrigateOnvifProxy.listen_port = args.port
     FrigateOnvifProxy.target_ptz_url = args.target
+    FrigateOnvifProxy.enable_zoom = args.zoom
 
     httpd = HTTPServer(('', args.port), FrigateOnvifProxy)
     print(f"ONVIF PROXY LISTENING: {args.port}")
