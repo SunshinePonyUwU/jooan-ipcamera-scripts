@@ -1,27 +1,27 @@
 import http.server
 import urllib.request
+import socket
 import sys
 import re
+
+print = lambda *args, **kwargs: None
 
 LISTEN_PORT = 8999
 TARGET_PTZ_URL = "http://172.18.0.154:8899/onvif/Ptz"
 
-# 1. 完善的能力集声明
 CAPABILITIES_XML = """<?xml version="1.0" encoding="UTF-8"?>
 <SOAP-ENV:Envelope xmlns:SOAP-ENV="http://www.w3.org/2003/05/soap-envelope" xmlns:tds="http://www.onvif.org/ver10/device/wsdl" xmlns:tt="http://www.onvif.org/ver10/schema">
   <SOAP-ENV:Body>
     <tds:GetCapabilitiesResponse>
       <tds:Capabilities>
-        <tt:Device><tt:XAddr>http://172.18.0.131:{port}/onvif/device_service</tt:XAddr></tt:Device>
-        <tt:Media><tt:XAddr>http://172.18.0.131:{port}/onvif/media</tt:XAddr></tt:Media>
-        <tt:PTZ><tt:XAddr>http://172.18.0.131:{port}/onvif/Ptz</tt:XAddr></tt:PTZ>
+        <tt:Device><tt:XAddr>http://{host}:{port}/onvif/device_service</tt:XAddr></tt:Device>
+        <tt:Media><tt:XAddr>http://{host}:{port}/onvif/media</tt:XAddr></tt:Media>
+        <tt:PTZ><tt:XAddr>http://{host}:{port}/onvif/Ptz</tt:XAddr></tt:PTZ>
       </tds:Capabilities>
     </tds:GetCapabilitiesResponse>
   </SOAP-ENV:Body>
 </SOAP-ENV:Envelope>"""
 
-# 2. 核心：让 Frigate 认出来的 Profile
-# 这里必须包含 <tt:PTZConfiguration> 节点
 GET_PROFILES_XML = """<?xml version="1.0" encoding="UTF-8"?>
 <SOAP-ENV:Envelope xmlns:SOAP-ENV="http://www.w3.org/2003/05/soap-envelope" xmlns:trt="http://www.onvif.org/ver10/media/wsdl" xmlns:tt="http://www.onvif.org/ver10/schema">
   <SOAP-ENV:Body>
@@ -45,7 +45,8 @@ GET_PROFILES_XML = """<?xml version="1.0" encoding="UTF-8"?>
 MOCK_RESPONSES = {
     "GetDeviceInformation": """<?xml version="1.0" encoding="UTF-8"?><SOAP-ENV:Envelope xmlns:SOAP-ENV="http://www.w3.org/2003/05/soap-envelope" xmlns:tds="http://www.onvif.org/ver10/device/wsdl"><SOAP-ENV:Body><tds:GetDeviceInformationResponse><tds:Manufacturer>Fake-Camera</tds:Manufacturer><tds:Model>Proxy-01</tds:Model><tds:FirmwareVersion>1.0</tds:FirmwareVersion><tds:SerialNumber>12345</tds:SerialNumber><tds:HardwareId>1.0</tds:HardwareId></tds:GetDeviceInformationResponse></SOAP-ENV:Body></SOAP-ENV:Envelope>""",
     "GetNodes": """<?xml version="1.0" encoding="UTF-8"?><SOAP-ENV:Envelope xmlns:SOAP-ENV="http://www.w3.org/2003/05/soap-envelope" xmlns:tptz="http://www.onvif.org/ver10/ptz/wsdl" xmlns:tt="http://www.onvif.org/ver10/schema"><SOAP-ENV:Body><tptz:GetNodesResponse><tptz:PTZNode token="Node_01"><tt:Name>Node1</tt:Name><tt:SupportedPTZSpaces/></tptz:PTZNode></tptz:GetNodesResponse></SOAP-ENV:Body></SOAP-ENV:Envelope>""",
-    "GetConfigurations": """<?xml version="1.0" encoding="UTF-8"?><SOAP-ENV:Envelope xmlns:SOAP-ENV="http://www.w3.org/2003/05/soap-envelope" xmlns:tptz="http://www.onvif.org/ver10/ptz/wsdl" xmlns:tt="http://www.onvif.org/ver10/schema"><SOAP-ENV:Body><tptz:GetConfigurationsResponse><tptz:PTZConfiguration token="PTZ_CONF_01"><tt:Name>Config1</tt:Name><tt:NodeToken>Node_01</tt:NodeToken></tptz:PTZConfiguration></tptz:GetConfigurationsResponse></SOAP-ENV:Body></SOAP-ENV:Envelope>"""
+    "GetConfigurations": """<?xml version="1.0" encoding="UTF-8"?><SOAP-ENV:Envelope xmlns:SOAP-ENV="http://www.w3.org/2003/05/soap-envelope" xmlns:tptz="http://www.onvif.org/ver10/ptz/wsdl" xmlns:tt="http://www.onvif.org/ver10/schema"><SOAP-ENV:Body><tptz:GetConfigurationsResponse><tptz:PTZConfiguration token="PTZ_CONF_01"><tt:Name>Config1</tt:Name><tt:NodeToken>Node_01</tt:NodeToken></tptz:PTZConfiguration></tptz:GetConfigurationsResponse></SOAP-ENV:Body></SOAP-ENV:Envelope>""",
+    "GetPresets": """<?xml version="1.0" encoding="UTF-8"?><SOAP-ENV:Envelope xmlns:SOAP-ENV="http://www.w3.org/2003/05/soap-envelope" xmlns:tptz="http://www.onvif.org/ver10/ptz/wsdl"><SOAP-ENV:Body><tptz:GetPresetsResponse></tptz:GetPresetsResponse></s:Body></s:Envelope>"""
 }
 
 class FrigateOnvifProxy(http.server.BaseHTTPRequestHandler):
@@ -53,11 +54,10 @@ class FrigateOnvifProxy(http.server.BaseHTTPRequestHandler):
         content_length = int(self.headers.get('Content-Length', 0))
         body = self.rfile.read(content_length).decode('utf-8')
 
-        # 核心逻辑区分
         if any(cmd in body for cmd in ["ContinuousMove", "Stop", "AbsoluteMove", "RelativeMove"]):
             self.forward_to_real_camera(body)
         elif "GetCapabilities" in body:
-            self.send_xml(CAPABILITIES_XML.format(port=LISTEN_PORT))
+            self.send_xml(CAPABILITIES_XML.format(host=self.headers.get('Host'), port=LISTEN_PORT))
         elif "GetProfiles" in body:
             self.send_xml(GET_PROFILES_XML)
         else:
@@ -75,8 +75,6 @@ class FrigateOnvifProxy(http.server.BaseHTTPRequestHandler):
 
             print(f"[DEBUG] 提取到速度: x={x}, y={y}")
 
-            # 2. 判断是移动还是停止
-            # 如果 Frigate 发送了 Stop 节点，或者速度全为 0，则构造 Stop 报文
             if "Stop" in body or (x == "0" and y == "0"):
                 print("[ACTION] 构造 Stop 指令")
                 payload = f'''<?xml version="1.0" encoding="UTF-8"?>
@@ -105,13 +103,11 @@ class FrigateOnvifProxy(http.server.BaseHTTPRequestHandler):
     </s:Envelope>'''
                 action = "http://www.onvif.org/ver20/ptz/wsdl/ContinuousMove"
 
-            # 3. 准备正确的 Headers (修复了之前的 dict 错误)
             headers = {
                 "Content-Type": "application/soap+xml; charset=utf-8",
                 "SOAPAction": action
             }
 
-            # 4. 执行请求
             req = urllib.request.Request(
                 TARGET_PTZ_URL,
                 data=payload.encode('utf-8'),
@@ -130,7 +126,6 @@ class FrigateOnvifProxy(http.server.BaseHTTPRequestHandler):
 
         except Exception as e:
             print(f"[ERROR] 转发失败: {e}")
-            # 兜底返回，防止客户端卡死
             self.send_response(200)
             self.end_headers()
             self.wfile.write(b'<?xml version="1.0" encoding="utf-8"?><s:Envelope xmlns:s="http://www.w3.org/2003/05/soap-envelope"><s:Body/></s:Envelope>')
@@ -142,7 +137,6 @@ class FrigateOnvifProxy(http.server.BaseHTTPRequestHandler):
                 self.send_xml(xml)
                 return
 
-        # 对于 Frigate 可能发起的其他探测，返回空 Envelope 保证不报错
         print(f"[DEBUG] 未捕获请求 (可能需要模拟): {body[:80]}...")
         empty_soap = """<?xml version="1.0" encoding="utf-8"?><SOAP-ENV:Envelope xmlns:SOAP-ENV="http://www.w3.org/2003/05/soap-envelope"><SOAP-ENV:Body/></SOAP-ENV:Envelope>"""
         self.send_xml(empty_soap)
@@ -154,7 +148,13 @@ class FrigateOnvifProxy(http.server.BaseHTTPRequestHandler):
         self.end_headers()
         self.wfile.write(xml_string.encode('utf-8'))
 
+class HTTPServer(http.server.HTTPServer):
+    address_family = socket.AF_INET6
+    def server_bind(self):
+        self.socket.setsockopt(socket.IPPROTO_IPV6, socket.IPV6_V6ONLY, 0)
+        super().server_bind()
+
 if __name__ == "__main__":
-    httpd = http.server.HTTPServer(('', LISTEN_PORT), FrigateOnvifProxy)
+    httpd = HTTPServer(('', LISTEN_PORT), FrigateOnvifProxy)
     print(f"ONVIF 代理服务器已启动: {LISTEN_PORT}")
     httpd.serve_forever()
